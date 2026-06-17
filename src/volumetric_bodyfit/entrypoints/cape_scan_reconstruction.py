@@ -1,0 +1,359 @@
+﻿import os
+import glob
+import hydra
+import numpy as np
+import omegaconf
+from omegaconf import DictConfig
+import pytorch_lightning as pl
+from hydra import compose, initialize
+import time   
+import tqdm
+import torch
+import trimesh
+import gc
+import pickle
+import sys
+sys.path.append(os.environ.get("BODYFIT_PROJECT_HOME", os.getcwd()))
+from utils_cop.prior import MaxMixturePrior
+# from utils_cop.SMPL import SMPL
+from smplx import SMPL
+
+
+from nn_core.common import PROJECT_ROOT
+from nn_core.serialization import NNCheckpointIO
+
+from volumetric_bodyfit.config.runtime import checkpoint_store, model_profile_store, project_home, registration_output_dir as out_folder, demo_scan_dir, rotated_demo_scan_dir, cape_raw_scan_dir, cape_smpl_info_dir # faust_registration_dir, faust_scan_dir
+from volumetric_bodyfit.dataflow.lightning_bridge import DatasetProfile
+from volumetric_bodyfit.solver.geometry import encode_scan_volume, integrate_field_vertices, adapt_field_on_scan, fit_body_model_to_field, refine_body_with_chamfer, refine_surface_offsets
+
+import warnings
+from trimesh import transformations
+warnings.filterwarnings("ignore")
+
+## Device
+device = torch.device('cuda')
+
+def export_mesh(T, r,t,s, path):
+        T.apply_scale(s)
+        T.apply_translation(t)
+        T.apply_transform(r)
+        
+        k = T.export(path)
+        return
+
+# ## Here you can set the path for different datasets
+# def get_dataset(name):
+#     if name=='demo':
+#         return demo_scan_dir
+#     if name=='demo_guess_rot':
+#         return rotated_demo_scan_dir
+#     if name=='FAUST_train_scans':
+#         return faust_scan_dir
+#     if name=='FAUST_train_reg':
+#         return faust_registration_dir
+#     raise ValueError('this challenge does not exists')
+
+## Function to load checkpoint
+def get_model(chk):
+    # Recovering the Path to the checkpoint
+    chk_zip = glob.glob(chk + 'checkpoints/*.zip')[0]
+    print(f"loading model ckpt: {chk_zip}")
+    
+    # Restoring the network configurations using the Hydra Settings
+    tmp = hydra.core.global_hydra.GlobalHydra.instance().clear()
+    profile_dir = os.path.join(model_profile_store, os.path.basename(os.path.normpath(chk)))
+    tmp = initialize(config_path="../../../" + str(profile_dir))
+    cfg_model = compose(config_name="config")
+    
+    # Recovering the metadata
+    train_data = hydra.utils.instantiate(cfg_model.nn.data.datasets.train, mode="test")
+    MD = DatasetProfile.from_dataset(train_data)
+    
+    # Instantiating the correct nentwork
+    model: pl.LightningModule = hydra.utils.instantiate(cfg_model.nn.module, _recursive_=False, metadata=MD)
+    
+    # Restoring the old checkpoint
+    old_checkpoint = NNCheckpointIO.load(path=chk_zip)
+    module = model._load_model_state(checkpoint=old_checkpoint, metadata=MD).to(device)
+    module.model.eval()
+    
+    return module, MD, train_data, cfg_model
+
+# Main Method to register all the shapes in a folder
+def run(cfg: DictConfig) -> str:
+    os.chdir(project_home)
+
+    # Recovering the parameters of the run
+    model_name = cfg['core'].checkpoint
+    chk = checkpoint_store + model_name + '/'
+    model_name = model_name
+
+    # Create Output Folders
+    if not(os.path.exists(out_folder + model_name)):
+        os.mkdir(out_folder + model_name)
+        
+    # out_dir = out_folder + model_name + '/' + cfg['core'].challenge 
+    out_dir = out_folder + model_name + '/' + 'cape_raw_fieldfit_20000'
+    # out_dir = out_folder + model_name + '/' + 'cape_eq_hitpts'
+     
+    if not(os.path.exists(out_dir)):
+        os.mkdir(out_dir)
+    
+    # Recover Data Path
+    # path_in = get_dataset(cfg['core'].challenge)
+    path_in = cape_raw_scan_dir
+    path_info = cape_smpl_info_dir
+    assert os.path.isdir(path_in), f"Path {path_in} is not an existing directory"
+    
+    # How the data are organized
+    if(cfg['core'].challenge in ('demo','demo_guess_rot')):
+        all_scans = glob.glob(os.path.join(path_in, '*/*.obj'))
+        # scans = sorted(glob.glob(os.path.join(path_in, '*/*.npz')))
+
+    # filtering and sampling with ratio=4
+    # print(len(all_scans))
+    print("start filtering scans with eval ids")
+    eval_ids = ['00122', '00159', '00215']
+    scans = sorted(
+        [scan for scan in all_scans if os.path.basename(scan)[:5] in eval_ids]
+    )
+    scans_part1 = scans[:len(scans)//4]
+    scans_part2 = scans[len(scans)//4:len(scans)//2]
+    scans_part3 = scans[len(scans)//2:3*len(scans)//4]
+    scans_part4 = scans[3*len(scans)//4:]
+    scans = scans_part4
+    gender_dict = {0: "female", 1: "male"}
+    print(f"number of target eval scans: {len(scans)}")
+    # exit()
+
+    print("--------------------------------------------")
+    # Get all existing output directories
+    # existing_ids = [d for d in os.listdir(out_dir) if os.path.isdir(os.path.join(out_dir, d))]
+    
+    # # Filter scans that haven't been processed yet
+    # filtered_scans = []
+    # for scan in scans:
+    #     scan_id = os.path.basename(scan)[23:-4]
+    #     if scan_id not in existing_ids:
+    #         filtered_scans.append(scan)
+    
+    # scans = filtered_scans
+    # scans_part1 = scans[:len(scans)//2]
+    # scans_part2 = scans[len(scans)//2:]
+    # # scans = scans_part1
+    # np.save(out_dir + '/scans_part1.npy', scans_part1)
+    # np.save(out_dir + '/scans_part2.npy', scans_part2)
+    # scans = np.load(out_dir + '/scans_part2.npy')
+    # exit()
+
+    # # scans = sorted([scan for scan in all_scans if os.path.basename(scan)[:5] in eval_ids])
+    # gender_dict = {0: 'female', 1: 'male'}
+    # print(f"number of target eval scans: {len(scans)}")
+    # print(f"number of filtered target eval scans: {len(filtered_scans)}")
+    # exit()
+        
+
+    print('--------------------------------------------')
+    # print(f'List of target scans: {scans}')
+    
+    # You can add an initial rotation for the shapes to align
+    # The axis.This one works for the FAUST shapes
+    
+    origin, xaxis = [0, 0, 0], [1, 0, 0]
+    # if cfg['core'].challenge in ('demo','demo_guess_rot'):
+    #     alpha = np.pi/2 #0
+    # else:
+        # alpha = np.pi/2
+    alpha = 0
+    # Rx = trimesh.transformations.rotation_matrix(alpha, xaxis)
+    # inv_Rx = trimesh.transformations.rotation_matrix(-alpha, xaxis)
+
+    # print(Rx)
+    # print(inv_Rx)
+
+    # exit()
+      
+    ### Get SMPL model
+    # SMPL_model = SMPL('neutral_smpl_with_cocoplus_reg.txt', obj_saveable = True).cuda()
+    prior = MaxMixturePrior(prior_folder='utils_cop/prior/', num_gaussians=8) 
+    prior.to(device)
+    
+    #### Restore Model
+    module, MD, train_data, cfg_model = get_model(chk)
+    module.cuda()
+    
+    ### Get Resolution and GT_IDXS of the experiment
+    res = MD.shape_spec()['occ_res']
+    gt_points = MD.shape_spec()['gt_points']
+    gt_idxs = train_data.idxs
+    data_type = cfg_model['nn']['data']['datasets']['type']
+    grad = cfg_model['nn']['module']['grad']
+
+    print('--------------------------------------------')
+    print('--------------------------------------------')               
+    ### REGISTRATIONS FOR ALL THE INPUT SHAPES
+    for scan in tqdm.tqdm(scans,desc="Scans:"):
+        print('--------------------------------------------')
+                
+        ### PRELIMINARIES: LOAD MODEL, LOAD SHAPE, SET CONFIGURATIONS OF THE REGISTRATION
+        print(f"Start :{scan}")
+        
+        # Basic Name --> You can add "tag" if you want to differentiate the runs
+        out_name = 'out' + cfg['core'].tag
+        
+        # Scans name format
+        # if(cfg['core'].challenge == 'demo'):
+        #     name = os.path.basename(os.path.dirname(scan))
+        # else:
+        name = os.path.basename(scan)[:-4]
+        id_ = name
+        print(id_)
+        # exit()
+        gt_smpl_info = np.load(os.path.join(path_info, id_, f"info_{id_}.npz"))
+        gender = gender_dict[gt_smpl_info['gender'].item()]
+        print('gender:', gender)
+        if gender == 'neutral':
+            body_model_path = 'datafolder/body_models/smpl/neutral/SMPL_NEUTRAL_10pc_rmchumpy.pkl'
+        elif gender == 'female':
+            body_model_path = 'datafolder/body_models/smpl/female/SMPL_FEMALE_10pc.pkl'
+        elif gender == 'male':
+            body_model_path = 'datafolder/body_models/smpl/male/SMPL_MALE_10pc.pkl'
+        else:
+            raise ValueError(f'Unexpected gender: {gender}')
+        SMPL_model = SMPL(body_model_path, create_body_pose=False,
+                      create_betas=False, create_global_orient=False).cuda()
+         
+        # If we want to use the Neural ICP Refinement    
+        if cfg['core'].ss_ref:
+            del module, train_data
+            module, MD, train_data, cfg_model = get_model(chk)
+        
+        # Read input shape       
+        scan_src = trimesh.load(scan, process=False, maintain_order=True)
+
+        sample_points, _ = trimesh.sample.sample_surface(
+            scan_src, 20000
+        )
+        scan_src = trimesh.PointCloud(sample_points)
+        # input_points = np.load(scan)['pred_inner_points']
+        # input_points = np.load(scan)['hitpts']
+        # scan_src = trimesh.PointCloud(input_points)
+        
+        Rx = trimesh.transformations.rotation_matrix(alpha, xaxis)
+        inv_Rx = trimesh.transformations.rotation_matrix(-alpha, xaxis)
+        
+        # Canonicalize the input point cloud and prepare input of IF-NET
+        scan_src.apply_transform(Rx)
+        voxel_src, mesh_src, scale, trasl = encode_scan_volume(scan_src, res, style=data_type, grad=grad)
+                
+        # Save algined mesh
+        if not(os.path.exists(out_dir +'/'+ name)):
+           os.mkdir(out_dir +'/'+ name)
+        
+        if not(cfg['core'].scaleback): 
+           trasl = trasl*0
+           scale = 1
+           inv_Rx = np.eye(4)
+        
+        export_mesh(mesh_src.copy(), inv_Rx, trasl, scale, out_dir +'/'+ name + '/aligned.ply')               
+        # k = mesh_src.export(out_dir +'/'+ name + '/aligned.ply')
+        
+        #######
+        
+        # IF field fitting is requested, run it
+        if cfg['core'].ss_ref:
+            # We add a name to specify the field fitting is performed
+            out_name = out_name + '_ss'
+            et = time.time()
+            module.train()
+            adapt_field_on_scan(module, torch.tensor(np.asarray(scan_src.vertices)), voxel_src, gt_points,steps=cfg['core'].steps_ss, lr_opt=cfg['core'].lr_ss)
+            module.eval()
+
+        # You can initialize LVD in different points in space. Default is at the origin
+        if cfg['core'].init:
+            picker = np.int32(np.random.uniform(0,len(mesh_src.vertices),gt_points))
+            init = torch.unsqueeze(torch.tensor(np.asarray(mesh_src.vertices[picker]),dtype=torch.float32),0)
+        else:
+            init = torch.zeros(1, gt_points, 3).cuda()
+        
+        # Fit LVD
+        reg_src =  integrate_field_vertices(module, gt_points, voxel_src, iters=cfg['lvd'].iters, init=init)
+
+        # apply inv_Rx, trasl, scale to the reg_src
+        reg_src = reg_src * scale + trasl
+        reg_src = transformations.transform_points(reg_src, inv_Rx)
+
+        # FIT SMPL Model to the LVD Prediction
+        out_s, params = fit_body_model_to_field(SMPL_model, reg_src, gt_idxs, prior, iterations=2000)
+        params_np = {}
+        for p in params.keys():
+            params_np[p] = params[p].detach().cpu().numpy()
+        
+        np.savez(out_dir +'/'+ name + '/pred_smpl_info_before_cham_refine.npz', pose=params_np['pose'][:, 3:].reshape(23, 3), betas=params_np['beta'].reshape(10), global_orient=params_np['pose'][:, :3].reshape(3), transl=params_np['trans'].reshape(3), joints=params_np['joints'].reshape(45, 3))
+        
+            
+        # Save intermidiate output 
+        # NOTE: You may want to remove this if you are interested only
+        # in the final registration
+        T = trimesh.Trimesh(vertices = out_s, faces = SMPL_model.faces) 
+        T.export(out_dir +'/'+ name + '/' + out_name + '.ply')
+        # export_mesh(T.copy(), inv_Rx, trasl, scale, out_dir +'/'+ name + '/' + out_name + '.ply')   
+        # np.save(out_dir +'/'+ name + '/loss_' + out_name + '.npy',params_np)
+        
+        # SMPL Refinement with Chamfer            
+        if cfg['core'].cham_ref:
+            # Mark the registration as Chamfer Refined
+            out_name = out_name + '_cham_' + str(cfg['core'].cham_bidir)
+            
+            # CHAMFER REGISTRATION
+            # cham_bidir = 0  -> Full and clean input
+            # cham_bidir = 1  -> Partial input
+            # cham_bidir = -1 -> Noise input
+
+            # apply inv_Rx, trasl, scale to the mesh_src.vertices
+            mesh_src.vertices = mesh_src.vertices * scale + trasl
+            mesh_src.vertices = transformations.transform_points(mesh_src.vertices, inv_Rx)
+            out_cham_s, params = refine_body_with_chamfer(SMPL_model, out_s, mesh_src.vertices, prior,params,cfg['core'].cham_bidir)
+            params_np = {}
+            for p in params.keys():
+                params_np[p] = params[p].detach().cpu().numpy()
+            
+            np.savez(out_dir +'/'+ name + '/pred_smpl_info_after_cham_refine.npz', pose=params_np['pose'][:, 3:].reshape(23, 3), betas=params_np['beta'].reshape(10), global_orient=params_np['pose'][:, :3].reshape(3), transl=params_np['trans'].reshape(3), joints=params_np['joints'].reshape(45, 3))
+
+            # Save Output
+            T = trimesh.Trimesh(vertices = out_cham_s, faces = SMPL_model.faces)
+            # export_mesh(T.copy(), inv_Rx, trasl, scale, out_dir +'/'+ name + '/' + out_name + '.ply')   
+            T.export(out_dir +'/'+ name + '/' + out_name + '.ply')
+
+
+            # DEBUG: Save some params of the fitting to check quality of the registration          
+            # for p in params.keys():
+            #     params[p] = params[p].detach().cpu().numpy()            
+            # np.save(out_dir +'/'+ name + '/loss_'+ out_name + '.npy',params)
+            
+            # Update the name
+            out_s = out_cham_s
+        
+        # # SMPL Refinement with +D
+        # if cfg['core'].plusD:
+        #     smpld_vertices, faces, params = refine_surface_offsets(out_s, SMPL_model, mesh_src.vertices, subdiv= 1, iterations=300)
+        #     T = trimesh.Trimesh(vertices = smpld_vertices, faces = faces)
+        #     out_name_grid = out_name + '_+D'
+        #     export_mesh(T.copy(), inv_Rx, trasl, scale, out_dir +'/'+ name + '/' + out_name_grid + '.ply') 
+        gc.collect()
+        
+@hydra.main(config_path=str(PROJECT_ROOT / "profiles"), config_name="default_cape")
+def main(cfg: omegaconf.DictConfig):
+    run(cfg)
+
+if __name__ == "__main__":
+    main()
+    
+
+
+
+
+
+
+
+

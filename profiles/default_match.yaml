@@ -1,0 +1,12 @@
+﻿# metadata specialised for each experiment
+core:
+  checkpoint: 1ljjfnbx
+  challenge: 
+    name: FAUST_train_reg
+  overwrite: False
+  regist: out
+  target: aligned
+  tag: ''
+  subdiv: 0
+  datadir: ${oc.env:BODYFIT_RESULT_DIR,./output/}
+

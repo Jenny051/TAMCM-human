@@ -1,0 +1,7 @@
+﻿# metadata specialised for each experiment
+core:
+  evaluate : _1ljjfnbx_out_ss_cham_0_0_
+  challenge: 
+    name: FAUST_train_reg
+  datadir: ${oc.env:BODYFIT_RESULT_DIR,./output/}
+

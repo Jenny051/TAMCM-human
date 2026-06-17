@@ -1,0 +1,132 @@
+﻿nn:
+  data:
+    _target_: volumetric_bodyfit.dataflow.lightning_bridge.ShapeFieldDataModule
+    overfit: false
+    gpus: 1
+    datasets:
+      version: CAPE
+      n_data: 0
+      n_points: 0
+      template: false
+      red_factor: 10
+      type: occ_dist
+      res: 64
+      train_ids: ${oc.env:BODYFIT_TRAIN_IDS,}
+      val_ids: ${oc.env:BODYFIT_VAL_IDS,}
+      train:
+        _target_: volumetric_bodyfit.dataflow.surface_samples.SmplFieldDataset
+        version: CAPE
+        n_data: 0
+        data_path: ${oc.env:BODYFIT_PROCESSED_DATA_DIR,./training_tmp/processed_data/}
+        n_points: 0
+        template: false
+        seed_idxs: 0
+        fine_std: 0.05
+        n_uniform: 400
+        n_fine_sampled: 1800
+        red_factor: 10
+        type: occ_dist
+        res: 64
+        v_locality: 0
+        segm: 16
+        coeffs: false
+        train_ids: ${oc.env:BODYFIT_TRAIN_IDS,}
+        val_ids: ${oc.env:BODYFIT_VAL_IDS,}
+    num_workers:
+      train: 24
+      val: 16
+      test: 16
+    batch_size:
+      train: 8
+      val: 4
+      test: 4
+  module:
+    _target_: volumetric_bodyfit.solver.system.FieldRegistrationModule
+    paradigm: LVD
+    smpl_path: ./support_data/body_models/smplh/neutral/model.npz
+    n_basis: 20
+    n_desc: 40
+    n_layers: 10
+    size_layers: 256
+    n_points: 0
+    template: false
+    fine_std: 0.05
+    n_uniform: 400
+    n_fine_sampled: 1800
+    grad: 100
+    clamp: 0.05
+    clamp_style: 1
+    gpus: 1
+    powerup: 1
+    power_factor: 2
+    segm: 16
+    onlydir: false
+    optimizer:
+      _target_: torch.optim.Adam
+      lr: 0.0001
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      weight_decay: 0
+train:
+  seed_index: 3407
+  deterministic: false
+  trainer:
+    fast_dev_run: false
+    gpus: 1
+    precision: 32
+    max_epochs: 20
+    max_steps: 1000000000
+    accumulate_grad_batches: 1
+    num_sanity_val_steps: 2
+    gradient_clip_val: 10.0
+    val_check_interval: 1.0
+    deterministic: false
+  restore:
+    ckpt_or_run_path: null
+    mode: continue
+  monitor:
+    metric: loss/val
+    mode: min
+  callbacks:
+  - _target_: pytorch_lightning.callbacks.EarlyStopping
+    patience: 100000
+    verbose: false
+    monitor: loss/val
+    mode: min
+  - _target_: pytorch_lightning.callbacks.ModelCheckpoint
+    save_top_k: 1
+    verbose: false
+    monitor: loss/val
+    mode: min
+  - _target_: pytorch_lightning.callbacks.LearningRateMonitor
+    logging_interval: step
+    log_momentum: false
+  - _target_: pytorch_lightning.callbacks.progress.tqdm_progress.TQDMProgressBar
+    refresh_rate: 20
+  logging:
+    upload:
+      run_files: true
+      source: true
+    logger:
+      _target_: pytorch_lightning.loggers.WandbLogger
+      project: matchAMASS_CAPE
+      entity: null
+      log_model: true
+      mode: online
+      tags: tag_cape
+    wandb_watch:
+      log: all
+      log_freq: 100
+core:
+  project_name: matchAMASS_CAPE
+  profile_dir: ${oc.env:BODYFIT_MODEL_PROFILE_DIR,./model_profiles}
+  version: 0.0.1
+  tags: tag_cape
+
+
+
+
+
+

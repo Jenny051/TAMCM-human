@@ -1,0 +1,86 @@
+# Volumetric Bodyfit dependency specification
+# ============================================================
+#
+# Recommended interpreter:
+#   Python 3.8.13
+#
+# This file lists the Python-level dependencies required by the refactored
+# volumetric human body fitting pipeline. It is intended for research and
+# reproducibility-oriented environments where CUDA, PyTorch, and geometry
+# processing extensions are installed explicitly.
+#
+# Install the CUDA-enabled PyTorch stack separately, for example:
+#   conda install -y pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+#
+# Install PyTorch3D separately with a wheel/source build that matches the local
+# CUDA and PyTorch versions.
+#
+# The following project-specific components are not listed as ordinary PyPI
+# packages because they are usually installed from local approved source trees:
+#   - body-model prior implementation
+#   - voxel preprocessing extensions
+#   - body-model fitting utility package
+#
+# After those native/source dependencies are available, install this file with:
+#   pip install -r requirement.txt
+
+
+# ------------------------------------------------------------
+# Experiment configuration and training framework
+# ------------------------------------------------------------
+nn-template-core==0.1.1
+hydra-core==1.2.0
+pytorch-lightning==1.5.10
+
+
+# ------------------------------------------------------------
+# Numerical computing and scientific Python stack
+# ------------------------------------------------------------
+numpy==1.23.5
+scipy==1.9.3
+scikit-learn==1.1.2
+scikit-image==0.19.3
+pandas==1.5.3
+
+
+# ------------------------------------------------------------
+# Geometry processing, mesh IO, and spatial operations
+# ------------------------------------------------------------
+open3d==0.15.2
+trimesh==3.13.0
+robust-laplacian==0.2.4
+plyfile==0.9
+smplx==0.1.28
+
+
+# ------------------------------------------------------------
+# Computer vision and visualization
+# ------------------------------------------------------------
+opencv-python==4.6.0.66
+matplotlib==3.6.3
+plotly==5.10.0
+seaborn==0.12.2
+
+
+# ------------------------------------------------------------
+# Logging, dashboards, progress display, and experiment tracking
+# ------------------------------------------------------------
+wandb==0.15.2
+streamlit==1.22.0
+rich==13.7.1
+stqdm==0.0.5
+tqdm==4.66.2
+
+
+# ------------------------------------------------------------
+# Data/versioning utilities and build helpers
+# ------------------------------------------------------------
+dvc==2.58.2
+python-dotenv==1.0.1
+cython==0.29.36
+
+
+# ------------------------------------------------------------
+# Install the local package in editable mode
+# ------------------------------------------------------------
+-e .
